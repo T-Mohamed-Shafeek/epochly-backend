@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 import os
 from dotenv import load_dotenv
+import logging
 
 from app.services.youtube_service import get_youtube_transcript
 from app.services.llm_service import generate_summary, generate_mcqs
@@ -80,17 +81,34 @@ async def fetch_transcript(
     credentials: dict = Depends(get_api_credentials)
 ):
     try:
+        # Log the request information
+        logging.info(f"Transcript request received for URL: {request.url}")
+        logging.info(f"API Provider: {credentials['api_provider']}")
+        logging.info(f"API Key present: {bool(credentials['api_key'])}")
+        
         # Get transcript from YouTube
-        transcript_result = get_youtube_transcript(request.url)
+        try:
+            transcript_result = get_youtube_transcript(request.url)
+            logging.info(f"Transcript fetched successfully. Video ID: {transcript_result['video_id']}")
+        except Exception as e:
+            logging.error(f"Error fetching transcript: {str(e)}")
+            raise HTTPException(status_code=400, detail=str(e))
         
         # Generate summary if requested
         summary = None
         if request.instructions:
-            summary = await generate_summary(
-                transcript_result["transcript"], 
-                credentials["api_key"],
-                request.instructions
-            )
+            logging.info("Summary requested with instructions")
+            try:
+                summary = await generate_summary(
+                    transcript_result["transcript"], 
+                    credentials["api_key"],
+                    request.instructions
+                )
+                logging.info("Summary generated successfully")
+            except Exception as e:
+                logging.error(f"Error generating summary: {str(e)}")
+                # Don't fail the whole request if summary generation fails
+                logging.info("Continuing with transcript only")
         
         return {
             "success": True,
@@ -98,8 +116,12 @@ async def fetch_transcript(
             "summary": summary,
             "video_id": transcript_result["video_id"]
         }
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        logging.exception("Unexpected error in fetch_transcript")
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
 @app.post("/api/youtube/generate-quiz", response_model=QuizResponse)
 async def generate_quiz(
