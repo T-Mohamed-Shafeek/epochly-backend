@@ -1,5 +1,7 @@
 import re
 import logging
+import json
+import requests
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 
 # Set up logging
@@ -83,6 +85,34 @@ def extract_video_id(url: str) -> str:
         logger.error(f"Error extracting video ID: {str(e)}")
         raise ValueError(f"Invalid YouTube URL format: {str(e)}")
 
+def get_transcript_with_alternative_api(video_id: str) -> str:
+    """
+    Alternative transcript fetcher using backend.js.org API
+    """
+    try:
+        logger.info(f"Trying alternative API for video ID: {video_id}")
+        api_url = f"https://tube.demarches.tech/api/v1/captions/{video_id}"
+        response = requests.get(api_url, timeout=10)
+        
+        if response.status_code != 200:
+            logger.error(f"Alternative API error: {response.status_code} - {response.text}")
+            raise ValueError(f"Alternative API returned status {response.status_code}")
+            
+        data = response.json()
+        
+        # Check if captions are available
+        if not data or "description" not in data or not data["description"]:
+            logger.error("Alternative API returned no captions")
+            raise ValueError("No captions found in alternative API response")
+            
+        # The API returns the full transcript in the description field
+        transcript_text = data["description"]
+        logger.info(f"Successfully retrieved transcript from alternative API: {len(transcript_text)} chars")
+        return transcript_text
+    except Exception as e:
+        logger.error(f"Alternative API error: {str(e)}")
+        raise ValueError(f"Alternative API error: {str(e)}")
+
 def get_youtube_transcript(url: str) -> dict:
     """
     Get transcript from YouTube video
@@ -93,6 +123,8 @@ def get_youtube_transcript(url: str) -> dict:
     Returns:
         Dictionary containing transcript text and video ID
     """
+    video_id = None
+    
     try:
         # Extract video ID from URL
         video_id = extract_video_id(url)
@@ -103,6 +135,20 @@ def get_youtube_transcript(url: str) -> dict:
             logger.info(f"Attempting to get transcript for video ID: {video_id}")
             transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
             logger.info(f"Successfully retrieved transcript with {len(transcript_list)} entries")
+            
+            # Combine transcript pieces into a single text
+            transcript_text = ""
+            for entry in transcript_list:
+                transcript_text += entry['text'] + " "
+            
+            # Clean up the transcript
+            transcript_text = transcript_text.strip()
+            logger.info(f"Transcript processed. Length: {len(transcript_text)} characters")
+            
+            return {
+                "transcript": transcript_text,
+                "video_id": video_id
+            }
         except Exception as e:
             # First attempt failed, log the error
             logger.error(f"Error getting transcript: {str(e)}")
@@ -112,6 +158,20 @@ def get_youtube_transcript(url: str) -> dict:
             try:
                 transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
                 logger.info(f"Successfully retrieved English transcript with {len(transcript_list)} entries")
+                
+                # Combine transcript pieces into a single text
+                transcript_text = ""
+                for entry in transcript_list:
+                    transcript_text += entry['text'] + " "
+                
+                # Clean up the transcript
+                transcript_text = transcript_text.strip()
+                logger.info(f"Transcript processed. Length: {len(transcript_text)} characters")
+                
+                return {
+                    "transcript": transcript_text,
+                    "video_id": video_id
+                }
             except Exception as e2:
                 logger.error(f"Error getting transcript with language code: {str(e2)}")
                 
@@ -123,30 +183,63 @@ def get_youtube_transcript(url: str) -> dict:
                     logger.info(f"Found transcript in language: {first_transcript.language}")
                     transcript_list = first_transcript.fetch()
                     logger.info(f"Successfully retrieved transcript in {first_transcript.language}")
+                    
+                    # Combine transcript pieces into a single text
+                    transcript_text = ""
+                    for entry in transcript_list:
+                        transcript_text += entry['text'] + " "
+                    
+                    # Clean up the transcript
+                    transcript_text = transcript_text.strip()
+                    logger.info(f"Transcript processed. Length: {len(transcript_text)} characters")
+                    
+                    return {
+                        "transcript": transcript_text,
+                        "video_id": video_id
+                    }
                 except Exception as e3:
-                    logger.error(f"All transcript retrieval methods failed: {str(e3)}")
-                    raise ValueError("No transcript available for this video after multiple attempts.")
-        
-        # Combine transcript pieces into a single text
-        transcript_text = ""
-        for entry in transcript_list:
-            transcript_text += entry['text'] + " "
-        
-        # Clean up the transcript
-        transcript_text = transcript_text.strip()
-        logger.info(f"Transcript processed. Length: {len(transcript_text)} characters")
-        
-        return {
-            "transcript": transcript_text,
-            "video_id": video_id
-        }
+                    logger.error(f"All standard transcript retrieval methods failed: {str(e3)}")
+                    
+                    # Last attempt: Try alternative API
+                    logger.info("Trying alternative API as final fallback")
+                    try:
+                        transcript_text = get_transcript_with_alternative_api(video_id)
+                        return {
+                            "transcript": transcript_text,
+                            "video_id": video_id
+                        }
+                    except Exception as e4:
+                        logger.error(f"Alternative API fallback failed: {str(e4)}")
+                        raise ValueError("No transcript available for this video after all attempts. This video likely doesn't have captions enabled.")
     
     except TranscriptsDisabled:
         logger.error(f"TranscriptsDisabled error for video ID: {video_id}")
-        raise ValueError("Transcripts are disabled for this video.")
+        
+        # Try alternative API as a last resort
+        try:
+            transcript_text = get_transcript_with_alternative_api(video_id)
+            return {
+                "transcript": transcript_text,
+                "video_id": video_id
+            }
+        except Exception as alt_error:
+            logger.error(f"Alternative API failed after TranscriptsDisabled: {str(alt_error)}")
+            raise ValueError("Transcripts are disabled for this video and alternative methods failed.")
+            
     except NoTranscriptFound:
         logger.error(f"NoTranscriptFound error for video ID: {video_id}")
-        raise ValueError("No transcript found for this video. It might not have captions available.")
+        
+        # Try alternative API as a last resort
+        try:
+            transcript_text = get_transcript_with_alternative_api(video_id)
+            return {
+                "transcript": transcript_text,
+                "video_id": video_id
+            }
+        except Exception as alt_error:
+            logger.error(f"Alternative API failed after NoTranscriptFound: {str(alt_error)}")
+            raise ValueError("No transcript found for this video. It might not have captions available.")
+            
     except ValueError as ve:
         # Pass through any ValueError we raised ourselves
         logger.error(f"ValueError: {str(ve)}")
