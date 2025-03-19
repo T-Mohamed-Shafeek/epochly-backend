@@ -4,6 +4,11 @@ import json
 import requests
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 import time
+import urllib3
+from bs4 import BeautifulSoup
+
+# Suppress SSL verification warning
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Import pytube for additional transcript retrieval method
 try:
@@ -12,6 +17,14 @@ try:
 except ImportError:
     PYTUBE_AVAILABLE = False
     logging.warning("pytube library not available - this fallback method won't be used")
+
+# Import BeautifulSoup for web scraping fallback
+try:
+    from bs4 import BeautifulSoup
+    BEAUTIFULSOUP_AVAILABLE = True
+except ImportError:
+    BEAUTIFULSOUP_AVAILABLE = False
+    logging.warning("BeautifulSoup library not available - webscraping fallback won't be used")
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -166,6 +179,103 @@ def get_transcript_with_pytube(video_id: str) -> str:
         logger.error(f"pytube error: {str(e)}")
         raise ValueError(f"pytube error: {str(e)}")
 
+def get_transcript_by_scraping(video_id: str) -> str:
+    """
+    Last resort method to attempt to extract transcript by scraping
+    """
+    if not BEAUTIFULSOUP_AVAILABLE:
+        raise ValueError("BeautifulSoup library not available for web scraping")
+        
+    try:
+        logger.info(f"Attempting to get transcript via web scraping for video ID: {video_id}")
+        
+        # Try to get the page with transcript data
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+        
+        # Try with a timeout and retry logic
+        max_retries = 2
+        retry_delay = 1
+        
+        for attempt in range(max_retries):
+            try:
+                response = requests.get(youtube_url, headers=headers, timeout=10)
+                break
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    raise
+                logger.warning(f"Scraping connection error (attempt {attempt+1}/{max_retries}): {str(e)}")
+                time.sleep(retry_delay)
+                retry_delay *= 2
+        
+        if response.status_code != 200:
+            raise ValueError(f"Failed to fetch YouTube page: {response.status_code}")
+            
+        # Parse the page
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Look for transcript data in the page
+        # This is a simplistic approach and may break if YouTube changes their structure
+        transcript_text = ""
+        
+        # Try to find script tags with JSON data
+        for script_tag in soup.find_all('script'):
+            if script_tag.string and "captionTracks" in script_tag.string:
+                script_content = script_tag.string
+                
+                # Extract captionTracks
+                caption_tracks_start = script_content.find("\"captionTracks\":")
+                if caption_tracks_start > -1:
+                    # Find the end of the captionTracks array
+                    caption_tracks_end = script_content.find("]", caption_tracks_start)
+                    caption_tracks_data = script_content[caption_tracks_start:caption_tracks_end+1]
+                    
+                    # Try to extract baseUrl
+                    base_url_match = re.search(r"\"baseUrl\":\"(.*?)\"", caption_tracks_data)
+                    if base_url_match:
+                        caption_url = base_url_match.group(1).replace("\\u0026", "&")
+                        
+                        # Fetch the caption file
+                        try:
+                            caption_response = requests.get(caption_url, timeout=10)
+                            if caption_response.status_code == 200:
+                                # Parse the XML
+                                caption_soup = BeautifulSoup(caption_response.text, 'xml')
+                                
+                                # Extract text from each entry
+                                for text_tag in caption_soup.find_all('text'):
+                                    if text_tag.string:
+                                        transcript_text += text_tag.string + " "
+                                
+                                if transcript_text:
+                                    break
+                        except Exception as e:
+                            logger.error(f"Error fetching caption file: {str(e)}")
+        
+        # Check if we found any transcript text
+        transcript_text = transcript_text.strip()
+        if not transcript_text or len(transcript_text) < 50:
+            # Try an alternative approach - look for transcript text in the page
+            # This is also likely to break if YouTube changes their page structure
+            transcript_sections = soup.find_all('div', {'class': 'segment-text'})
+            if transcript_sections:
+                for section in transcript_sections:
+                    transcript_text += section.get_text() + " "
+                    
+        # Final check for transcript text
+        transcript_text = transcript_text.strip()
+        if not transcript_text or len(transcript_text) < 50:
+            raise ValueError("Could not extract transcript via web scraping")
+            
+        logger.info(f"Successfully retrieved transcript via web scraping: {len(transcript_text)} chars")
+        return transcript_text
+        
+    except Exception as e:
+        logger.error(f"Web scraping error: {str(e)}")
+        raise ValueError(f"Failed to extract transcript via web scraping: {str(e)}")
+
 def get_transcript_with_alternative_api(video_id: str) -> str:
     """
     Alternative transcript fetcher using multiple fallback APIs
@@ -201,7 +311,9 @@ def get_transcript_with_alternative_api(video_id: str) -> str:
     for api in apis:
         try:
             logger.info(f"Trying {api['name']} API for video ID: {video_id}")
-            response = requests.get(api["url"], timeout=15)
+            
+            # Disable SSL verification for these APIs as they often have self-signed certificates
+            response = requests.get(api["url"], timeout=15, verify=False)
             
             if response.status_code != 200:
                 logger.warning(f"{api['name']} API error: {response.status_code} - {response.text}")
@@ -227,8 +339,16 @@ def get_transcript_with_alternative_api(video_id: str) -> str:
             last_error = e
             continue
     
-    # If we get here, all APIs failed
-    error_msg = f"All alternative APIs failed. Last error: {str(last_error)}"
+    # Final fallback - try web scraping if available
+    if BEAUTIFULSOUP_AVAILABLE:
+        try:
+            return get_transcript_by_scraping(video_id)
+        except Exception as e:
+            logger.warning(f"Web scraping fallback failed: {str(e)}")
+            # Continue to error
+    
+    # If we get here, all methods failed
+    error_msg = f"All alternative APIs and fallbacks failed. Last error: {str(last_error)}"
     logger.error(error_msg)
     raise ValueError(error_msg)
 
