@@ -85,4 +85,4 @@ def get_youtube_transcript(url: str) -> dict:
         raise ValueError("No transcript found for this video. It might not have captions available.")
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}")
-        raise ValueError(f"Error fetching transcript: {str(e)}") 
+        raise ValueError(f"Error fetching transcript: {str(e)}")
