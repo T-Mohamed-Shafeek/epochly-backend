@@ -1,10 +1,16 @@
 # Epochly Backend
 
-FastAPI backend for Epochly learning platform with YouTube transcription and LLM capabilities.
+FastAPI backend for Epochly learning platform with enhanced YouTube transcription, multiple fallback methods, and LLM capabilities.
 
 ## Features
 
 - YouTube video transcript fetching using `youtube-transcript-api`
+- Multiple transcript retrieval fallback methods:
+  - Pre-cached transcripts for example videos
+  - PyTube integration for additional transcript sources
+  - Multiple alternative transcript APIs with SSL verification handling
+  - Web scraping fallback for extracting transcripts
+- Integration with manual transcript submission from NoteGPT
 - Summary generation using Groq LLM
 - Multiple-choice question (MCQ) generation
 - User-provided Groq API key support
@@ -99,6 +105,18 @@ Generates quiz questions from a transcript.
 }
 ```
 
+## Transcript Retrieval Process
+
+The backend uses a multi-stage approach to maximize transcript availability:
+
+1. **Cached Transcript Check**: First checks if the video is in our pre-cached examples
+2. **YouTube API Attempt**: Uses the official `youtube-transcript-api` with multiple language options
+3. **PyTube Fallback**: Uses the PyTube library to extract captions directly
+4. **Alternative APIs**: Tries multiple alternative APIs that can extract captions
+5. **Web Scraping**: Final fallback method that extracts transcript directly from YouTube's page
+
+If all automatic methods fail, the frontend provides a manual submission option with NoteGPT integration.
+
 ## Frontend Integration
 
 This backend is designed to work with the Epochly frontend, replacing the previous YouTube Data API implementation with a more robust solution that:
@@ -106,5 +124,6 @@ This backend is designed to work with the Epochly frontend, replacing the previo
 1. Uses the `youtube-transcript-api` library for transcript fetching
 2. Processes transcripts using the Groq LLM API
 3. Generates summaries and MCQs based on user configuration
+4. Handles transcript failures gracefully with fallback options
 
 Update your frontend API calls to match the endpoints provided by this backend service. 
