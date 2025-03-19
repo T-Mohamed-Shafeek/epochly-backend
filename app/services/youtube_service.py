@@ -12,19 +12,76 @@ def extract_video_id(url: str) -> str:
     Supports formats:
     - youtube.com/watch?v=VIDEO_ID
     - youtu.be/VIDEO_ID
+    - youtu.be/VIDEO_ID?si=...
     - youtube.com/embed/VIDEO_ID
     """
-    # Patterns for YouTube URLs
-    youtube_patterns = [
-        r'(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([a-zA-Z0-9_-]{11})',
-    ]
+    # Patterns for YouTube URLs with better handling of query parameters
+    try:
+        # Short URL format (youtu.be/ID?parameters)
+        if 'youtu.be/' in url:
+            # Find the position after youtu.be/
+            start_pos = url.find('youtu.be/') + len('youtu.be/')
+            # Either find the next ? or take until the end
+            if '?' in url[start_pos:]:
+                end_pos = url.find('?', start_pos)
+                video_id = url[start_pos:end_pos]
+            else:
+                video_id = url[start_pos:]
+                
+            # Verify it's 11 characters
+            if len(video_id) == 11:
+                logger.info(f"Extracted video ID '{video_id}' from short URL")
+                return video_id
+                
+        # Watch URL format (youtube.com/watch?v=ID&parameters)
+        elif 'youtube.com/watch' in url and 'v=' in url:
+            # Find v= parameter
+            start_pos = url.find('v=') + len('v=')
+            # Either find the next & or take until the end
+            if '&' in url[start_pos:]:
+                end_pos = url.find('&', start_pos)
+                video_id = url[start_pos:end_pos]
+            else:
+                video_id = url[start_pos:]
+                
+            # Verify it's 11 characters
+            if len(video_id) == 11:
+                logger.info(f"Extracted video ID '{video_id}' from watch URL")
+                return video_id
+                
+        # Embed URL format
+        elif 'youtube.com/embed/' in url:
+            # Find the position after youtube.com/embed/
+            start_pos = url.find('youtube.com/embed/') + len('youtube.com/embed/')
+            # Either find the next ? or take until the end
+            if '?' in url[start_pos:]:
+                end_pos = url.find('?', start_pos)
+                video_id = url[start_pos:end_pos]
+            else:
+                video_id = url[start_pos:]
+                
+            # Verify it's 11 characters
+            if len(video_id) == 11:
+                logger.info(f"Extracted video ID '{video_id}' from embed URL")
+                return video_id
+                
+        # Fallback to regex pattern for other formats
+        patterns = [
+            r'(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([a-zA-Z0-9_-]{11})'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, url)
+            if match:
+                logger.info(f"Extracted video ID '{match.group(1)}' using regex")
+                return match.group(1)
+            
+        # If we get here, none of the extraction methods worked
+        raise ValueError("Failed to extract video ID from URL")
     
-    for pattern in youtube_patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-    
-    raise ValueError("Invalid YouTube URL. Please provide a valid YouTube video URL.")
+    except Exception as e:
+        logger.error(f"Error extracting video ID: {str(e)}")
+        raise ValueError(f"Invalid YouTube URL format: {str(e)}")
 
 def get_youtube_transcript(url: str) -> dict:
     """
