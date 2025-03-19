@@ -1,13 +1,21 @@
-from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi import FastAPI, HTTPException, Depends, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional
 import os
-from dotenv import load_dotenv
 import logging
+from dotenv import load_dotenv
 
 from app.services.youtube_service import get_youtube_transcript
 from app.services.llm_service import generate_summary, generate_mcqs
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+)
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
@@ -70,6 +78,15 @@ def get_api_credentials(
     
     return {"api_key": x_api_key, "api_provider": x_api_provider}
 
+# Global exception handler
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Global exception handler caught: {str(exc)}")
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal server error: {str(exc)}"},
+    )
+
 # API Routes
 @app.get("/")
 async def root():
@@ -81,34 +98,22 @@ async def fetch_transcript(
     credentials: dict = Depends(get_api_credentials)
 ):
     try:
-        # Log the request information
-        logging.info(f"Transcript request received for URL: {request.url}")
-        logging.info(f"API Provider: {credentials['api_provider']}")
-        logging.info(f"API Key present: {bool(credentials['api_key'])}")
+        logger.info(f"Processing transcript request for URL: {request.url}")
         
         # Get transcript from YouTube
-        try:
-            transcript_result = get_youtube_transcript(request.url)
-            logging.info(f"Transcript fetched successfully. Video ID: {transcript_result['video_id']}")
-        except Exception as e:
-            logging.error(f"Error fetching transcript: {str(e)}")
-            raise HTTPException(status_code=400, detail=str(e))
+        transcript_result = get_youtube_transcript(request.url)
+        logger.info(f"Successfully retrieved transcript for video ID: {transcript_result['video_id']}")
         
         # Generate summary if requested
         summary = None
         if request.instructions:
-            logging.info("Summary requested with instructions")
-            try:
-                summary = await generate_summary(
-                    transcript_result["transcript"], 
-                    credentials["api_key"],
-                    request.instructions
-                )
-                logging.info("Summary generated successfully")
-            except Exception as e:
-                logging.error(f"Error generating summary: {str(e)}")
-                # Don't fail the whole request if summary generation fails
-                logging.info("Continuing with transcript only")
+            logger.info("Generating summary with instructions")
+            summary = await generate_summary(
+                transcript_result["transcript"], 
+                credentials["api_key"],
+                request.instructions
+            )
+            logger.info("Summary generated successfully")
         
         return {
             "success": True,
@@ -116,11 +121,11 @@ async def fetch_transcript(
             "summary": summary,
             "video_id": transcript_result["video_id"]
         }
-    except HTTPException:
-        # Re-raise HTTP exceptions
-        raise
+    except ValueError as e:
+        logger.error(f"ValueError in fetch_transcript: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logging.exception("Unexpected error in fetch_transcript")
+        logger.error(f"Unexpected error in fetch_transcript: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
 @app.post("/api/youtube/generate-quiz", response_model=QuizResponse)
@@ -129,13 +134,16 @@ async def generate_quiz(
     credentials: dict = Depends(get_api_credentials)
 ):
     try:
+        logger.info(f"Generating quiz with {request.numQuestions} questions")
         questions = await generate_mcqs(
             request.transcript, 
             credentials["api_key"], 
             request.numQuestions
         )
+        logger.info(f"Successfully generated {len(questions)} questions")
         return {"questions": questions}
     except Exception as e:
+        logger.error(f"Error in generate_quiz: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
 
 # For direct execution

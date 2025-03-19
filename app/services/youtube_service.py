@@ -1,9 +1,8 @@
-from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 import re
 import logging
+from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 
 # Set up logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def extract_video_id(url: str) -> str:
@@ -20,16 +19,11 @@ def extract_video_id(url: str) -> str:
         r'(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([a-zA-Z0-9_-]{11})',
     ]
     
-    logger.info(f"Extracting video ID from URL: {url}")
-    
     for pattern in youtube_patterns:
         match = re.search(pattern, url)
         if match:
-            video_id = match.group(1)
-            logger.info(f"Successfully extracted video ID: {video_id}")
-            return video_id
+            return match.group(1)
     
-    logger.error(f"Failed to extract video ID from URL: {url}")
     raise ValueError("Invalid YouTube URL. Please provide a valid YouTube video URL.")
 
 def get_youtube_transcript(url: str) -> dict:
@@ -45,23 +39,36 @@ def get_youtube_transcript(url: str) -> dict:
     try:
         # Extract video ID from URL
         video_id = extract_video_id(url)
+        logger.info(f"Extracted video ID: {video_id} from URL: {url}")
         
-        logger.info(f"Fetching transcript for video ID: {video_id}")
-        
-        # Get transcript from YouTube
         try:
+            # First attempt: Try to get transcript with default settings
+            logger.info(f"Attempting to get transcript for video ID: {video_id}")
             transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
-            logger.info(f"Retrieved {len(transcript_list)} transcript entries")
+            logger.info(f"Successfully retrieved transcript with {len(transcript_list)} entries")
         except Exception as e:
+            # First attempt failed, log the error
             logger.error(f"Error getting transcript: {str(e)}")
-            # Try with language code
+            
+            # Second attempt: Try with English language code explicitly
+            logger.info("Trying to get transcript with language code 'en'")
             try:
-                logger.info("Trying to get transcript with language code 'en'")
                 transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
-                logger.info(f"Retrieved {len(transcript_list)} transcript entries with language code")
-            except Exception as inner_e:
-                logger.error(f"Error getting transcript with language code: {str(inner_e)}")
-                raise
+                logger.info(f"Successfully retrieved English transcript with {len(transcript_list)} entries")
+            except Exception as e2:
+                logger.error(f"Error getting transcript with language code: {str(e2)}")
+                
+                # Third attempt: Try getting all available transcripts and selecting the first one
+                logger.info("Trying to list all available transcripts")
+                try:
+                    transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+                    first_transcript = next(iter(transcript_list))
+                    logger.info(f"Found transcript in language: {first_transcript.language}")
+                    transcript_list = first_transcript.fetch()
+                    logger.info(f"Successfully retrieved transcript in {first_transcript.language}")
+                except Exception as e3:
+                    logger.error(f"All transcript retrieval methods failed: {str(e3)}")
+                    raise ValueError("No transcript available for this video after multiple attempts.")
         
         # Combine transcript pieces into a single text
         transcript_text = ""
@@ -78,11 +85,15 @@ def get_youtube_transcript(url: str) -> dict:
         }
     
     except TranscriptsDisabled:
-        logger.error(f"Transcripts are disabled for video ID: {video_id}")
-        raise ValueError("Transcripts are disabled for this video. Please try another video.")
+        logger.error(f"TranscriptsDisabled error for video ID: {video_id}")
+        raise ValueError("Transcripts are disabled for this video.")
     except NoTranscriptFound:
-        logger.error(f"No transcript found for video ID: {video_id}")
+        logger.error(f"NoTranscriptFound error for video ID: {video_id}")
         raise ValueError("No transcript found for this video. It might not have captions available.")
+    except ValueError as ve:
+        # Pass through any ValueError we raised ourselves
+        logger.error(f"ValueError: {str(ve)}")
+        raise
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}")
-        raise ValueError(f"Error fetching transcript: {str(e)}")
+        raise ValueError(f"Error fetching transcript: {str(e)}") 
