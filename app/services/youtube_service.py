@@ -3,6 +3,15 @@ import logging
 import json
 import requests
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
+import time
+
+# Import pytube for additional transcript retrieval method
+try:
+    from pytube import YouTube
+    PYTUBE_AVAILABLE = True
+except ImportError:
+    PYTUBE_AVAILABLE = False
+    logging.warning("pytube library not available - this fallback method won't be used")
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -85,33 +94,143 @@ def extract_video_id(url: str) -> str:
         logger.error(f"Error extracting video ID: {str(e)}")
         raise ValueError(f"Invalid YouTube URL format: {str(e)}")
 
+def get_transcript_with_pytube(video_id: str) -> str:
+    """
+    Attempt to get transcript using pytube library
+    """
+    if not PYTUBE_AVAILABLE:
+        raise ValueError("pytube library not available")
+        
+    try:
+        logger.info(f"Trying pytube for video ID: {video_id}")
+        youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+        
+        # Add retry logic with backoff
+        max_retries = 3
+        retry_delay = 2
+        
+        for attempt in range(max_retries):
+            try:
+                yt = YouTube(youtube_url)
+                break
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    raise
+                logger.warning(f"pytube connection error (attempt {attempt+1}/{max_retries}): {str(e)}")
+                time.sleep(retry_delay)
+                retry_delay *= 2
+        
+        # Get caption tracks
+        caption_tracks = yt.captions
+        
+        if not caption_tracks or len(caption_tracks) == 0:
+            logger.warning("No captions found using pytube")
+            raise ValueError("No captions found using pytube")
+            
+        # Try to get English captions first
+        caption = None
+        for track in caption_tracks:
+            if track.code.startswith('en'):
+                caption = track
+                break
+                
+        # If no English captions, use the first available
+        if caption is None and len(caption_tracks) > 0:
+            caption = list(caption_tracks.values())[0]
+            
+        if caption is None:
+            raise ValueError("No usable captions found")
+            
+        # Get the transcript text
+        transcript_xml = caption.xml_captions
+        
+        # Simple XML parsing to extract text
+        transcript_text = ""
+        import re
+        text_parts = re.findall(r'<text[^>]*>(.*?)</text>', transcript_xml)
+        
+        for part in text_parts:
+            # Remove XML entities and cleanup
+            cleaned_part = part.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+            transcript_text += cleaned_part + " "
+            
+        transcript_text = transcript_text.strip()
+        
+        if not transcript_text or len(transcript_text) < 50:
+            raise ValueError("Retrieved transcript is too short or empty")
+            
+        logger.info(f"Successfully retrieved transcript using pytube: {len(transcript_text)} chars")
+        return transcript_text
+        
+    except Exception as e:
+        logger.error(f"pytube error: {str(e)}")
+        raise ValueError(f"pytube error: {str(e)}")
+
 def get_transcript_with_alternative_api(video_id: str) -> str:
     """
-    Alternative transcript fetcher using backend.js.org API
+    Alternative transcript fetcher using multiple fallback APIs
     """
-    try:
-        logger.info(f"Trying alternative API for video ID: {video_id}")
-        api_url = f"https://tube.demarches.tech/api/v1/captions/{video_id}"
-        response = requests.get(api_url, timeout=10)
-        
-        if response.status_code != 200:
-            logger.error(f"Alternative API error: {response.status_code} - {response.text}")
-            raise ValueError(f"Alternative API returned status {response.status_code}")
+    apis = [
+        {
+            "name": "tube.demarches.tech",
+            "url": f"https://tube.demarches.tech/api/v1/captions/{video_id}",
+            "extract": lambda data: data.get("description", "")
+        },
+        {
+            "name": "inv.bp.mutahar.rocks",
+            "url": f"https://inv.bp.mutahar.rocks/api/v1/captions/{video_id}",
+            "extract": lambda data: data.get("description", "")
+        },
+        {
+            "name": "vid.puffyan.us",
+            "url": f"https://vid.puffyan.us/api/v1/videos/{video_id}?fields=captions",
+            "extract": lambda data: "\n".join([cap.get("label", "") for cap in data.get("captions", [])])
+        }
+    ]
+    
+    last_error = None
+    
+    # First try pytube if available
+    if PYTUBE_AVAILABLE:
+        try:
+            return get_transcript_with_pytube(video_id)
+        except Exception as e:
+            logger.warning(f"pytube fallback failed: {str(e)}")
+            # Continue to other APIs
+    
+    for api in apis:
+        try:
+            logger.info(f"Trying {api['name']} API for video ID: {video_id}")
+            response = requests.get(api["url"], timeout=15)
             
-        data = response.json()
-        
-        # Check if captions are available
-        if not data or "description" not in data or not data["description"]:
-            logger.error("Alternative API returned no captions")
-            raise ValueError("No captions found in alternative API response")
+            if response.status_code != 200:
+                logger.warning(f"{api['name']} API error: {response.status_code} - {response.text}")
+                continue
+                
+            try:
+                data = response.json()
+            except json.JSONDecodeError:
+                logger.warning(f"{api['name']} API returned invalid JSON")
+                continue
+                
+            transcript_text = api["extract"](data)
             
-        # The API returns the full transcript in the description field
-        transcript_text = data["description"]
-        logger.info(f"Successfully retrieved transcript from alternative API: {len(transcript_text)} chars")
-        return transcript_text
-    except Exception as e:
-        logger.error(f"Alternative API error: {str(e)}")
-        raise ValueError(f"Alternative API error: {str(e)}")
+            if not transcript_text or len(transcript_text) < 50:
+                logger.warning(f"{api['name']} API returned empty or very short transcript")
+                continue
+                
+            logger.info(f"Successfully retrieved transcript from {api['name']} API: {len(transcript_text)} chars")
+            return transcript_text
+            
+        except Exception as e:
+            logger.error(f"{api['name']} API error: {str(e)}")
+            last_error = e
+            continue
+    
+    # If we get here, all APIs failed
+    error_msg = f"All alternative APIs failed. Last error: {str(last_error)}"
+    logger.error(error_msg)
+    raise ValueError(error_msg)
 
 def get_youtube_transcript(url: str) -> dict:
     """
